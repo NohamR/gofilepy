@@ -5,30 +5,60 @@ on:
     branches: [ main ]
     tags:
       - 'v*'
-    paths-ignore:
-      - "README.md"
+    paths:
+      - "pyproject.toml"
 
+permissions:
+  contents: write # to create tag
 jobs:
-  build:
+  deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
 
+      # 1. tag extraction of pyproject.toml
+      - name: Extract version from pyproject.toml
+        id: get_version
+        run: |
+          VERSION=$(grep -m 1 'version = "' pyproject.toml | cut -d '"' -f 2)
+          echo "Detected version: $VERSION"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      # 2. tag verification
+      - name: Check if tag exists
+        uses: mukunku/tag-exists-action@v1.2.0
+        id: check_tag
+        with: 
+          tag: 'v${{ env.VERSION }}'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 3. Setup environnement (if tag doesn't exist)
       - name: Set up Python
+        if: steps.check_tag.outputs.exists == 'false'
         uses: actions/setup-python@v4
         with:
           python-version: "3.9"
 
       - name: Install dependencies
+        if: steps.check_tag.outputs.exists == 'false'
         run: |
           python -m pip install --upgrade pip
           pip install build
 
+      # 4. Compilation (.whl and .tar.gz)
       - name: Build package
+        if: steps.check_tag.outputs.exists == 'false'
         run: python -m build
 
-      - name: Archive artifacts
-        uses: actions/upload-artifact@v4
+      # 5. auto creation of tag and github release
+      - name: Create Release and Upload Assets
+        if: steps.check_tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v1
         with:
-          name: dist
-          path: dist/
+          tag_name: v${{ env.VERSION }}      # Ex: v1.0.2
+          name: Release v${{ env.VERSION }}   # release title
+          files: dist/*                       # files to upload
+          generate_release_notes: true        # generate changelog data
+          draft: false
+          prerelease: false
