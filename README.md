@@ -8,10 +8,11 @@ It supports the free API tiers, streaming uploads (low memory usage for large fi
 ## Features
 
 - **Streaming Uploads**: Upload 100GB+ files without loading them into RAM.
+- **Download Support**: Download files from Gofile URLs or content IDs.
 - **Folder Management**: Upload to specific folders or create new ones automatically.
 - **Script Ready**: JSON output mode for easy parsing in pipelines.
 - **Free Tier Support**: Handles Guest accounts and Standard tokens.
-- **Progress Bar**: Visual feedback for long uploads.
+- **Progress Bar**: Visual feedback for long uploads and downloads.
 
 ## Installation
 
@@ -68,6 +69,24 @@ Upload multiple files. The first file creates a folder, and the rest are uploade
 gofilepy -s part1.rar part2.rar part3.rar
 ```
 
+### Download Files
+Download files from a Gofile URL or content ID.
+
+Download from URL:
+```bash
+gofilepy -d https://gofile.io/d/GxHNKL
+```
+
+Download from content ID:
+```bash
+gofilepy -d GxHNKL
+```
+
+Download to specific directory
+```bash
+gofilepy -d GxHNKL -o ./downloads
+```
+
 ### Scripting Mode (JSON Output)
 Use `--json` to suppress human-readable text and output a JSON array.
 
@@ -87,6 +106,8 @@ gofilepy -vv big_file.iso
 
 You can use `gofilepy` in your own Python scripts.
 
+### Upload Files
+
 ```python
 from gofilepy import GofileClient
 
@@ -95,6 +116,17 @@ client = GofileClient()
 file = client.upload(file=open("./test.py", "rb"))
 print(file.name)
 print(file.page_link)  # View and download file at this link
+```
+
+### Download Files
+
+```python
+from gofilepy import GofileClient
+
+client = GofileClient()
+contents = client.get_contents("GxHNKL")
+print("Folder contents:")
+print(contents)
 ```
 
 ## Development

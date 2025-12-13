@@ -24,7 +24,21 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Gofile.io CLI Uploader (HTTPX Edition)",
     )
-    parser.add_argument("files", nargs="+", help="Files to upload")
+    parser.add_argument("files", nargs="*", help="Files to upload")
+    parser.add_argument(
+        "-d",
+        "--download",
+        type=str,
+        metavar="URL",
+        help="Download files from a Gofile URL (folder or content ID).",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        default=".",
+        help="Output directory for downloads (default: current directory).",
+    )
     parser.add_argument(
         "-s",
         "--to-single-folder",
@@ -84,12 +98,12 @@ def _progress_callback_factory(progress_bar: Optional[tqdm]) -> Callable[[int], 
     return update
 
 
-def _create_progress_bar(filename: str, total: int, quiet: bool) -> Optional[tqdm]:
+def _create_progress_bar(filename: str, total: int, quiet: bool, mode: str = "Uploading") -> Optional[tqdm]:
     """Create a tqdm progress bar unless JSON mode is requested."""
 
     if quiet:
         return None
-    return tqdm(total=total, unit="B", unit_scale=True, desc=f"Uploading {filename}")
+    return tqdm(total=total, unit="B", unit_scale=True, desc=f"{mode} {filename}")
 
 
 def _handle_upload_success(
@@ -177,7 +191,129 @@ def upload_files(args: argparse.Namespace, client: GofileClient) -> List[Dict[st
     return results
 
 
-def output_results(results: List[Dict[str, object]], json_mode: bool) -> None:
+def extract_content_id(url_or_id: str) -> str:
+    """Extract the content ID from a Gofile URL or return the ID as-is."""
+
+    # Handle URLs like https://gofile.io/d/nC5ulQ or direct IDs
+    if "gofile.io/d/" in url_or_id:
+        return url_or_id.split("gofile.io/d/")[-1].split("?")[0].split("/")[0]
+    elif "gofile.io" in url_or_id:
+        # Handle other URL patterns
+        parts = url_or_id.rstrip("/").split("/")
+        return parts[-1].split("?")[0]
+    return url_or_id
+
+
+def download_files(args: argparse.Namespace, client: GofileClient) -> List[Dict[str, object]]:
+    """Download files from a Gofile URL or content ID."""
+
+    results: List[Dict[str, object]] = []
+    content_id = extract_content_id(args.download)
+    
+    try:
+        # Fetch content information
+        logger.info("Fetching content information for: %s", content_id)
+        response = client.get_contents(content_id)
+        
+        # The response is already the "data" object from get_contents
+        data = response if isinstance(response, dict) else {}
+        if not isinstance(data, dict):
+            raise GofileError("Invalid response structure from API")
+        
+        content_type = data.get("type")
+        
+        if content_type == "file":
+            # Single file download
+            file_name = str(data.get("name", "downloaded_file"))
+            download_link = str(data.get("link", ""))
+            
+            if not download_link:
+                raise GofileError("No download link found in response")
+            
+            output_path = os.path.join(args.output, file_name)
+            file_size = int(data.get("size", 0))
+            
+            progress_bar = _create_progress_bar(file_name, file_size, args.json, mode="Downloading")
+            progress_callback = _progress_callback_factory(progress_bar)
+            
+            try:
+                client.download_file(download_link, output_path, progress_callback)
+                results.append({
+                    "file": file_name,
+                    "status": "success",
+                    "path": output_path,
+                    "size": file_size,
+                })
+            except (GofileError, httpx.HTTPError, OSError) as error:
+                logger.error("Download failed for %s: %s", file_name, error)
+                results.append(_handle_upload_error(file_name, error))
+            finally:
+                if progress_bar:
+                    progress_bar.close()
+                    
+        elif content_type == "folder":
+            # Multiple files in folder
+            children = data.get("children", {})
+            if not isinstance(children, dict):
+                raise GofileError("Invalid children structure in folder response")
+            
+            logger.info("Found %s file(s) in folder", len(children))
+            
+            for child_id, child_data in children.items():
+                if not isinstance(child_data, dict):
+                    continue
+                    
+                child_type = child_data.get("type")
+                if child_type != "file":
+                    logger.debug("Skipping non-file item: %s", child_id)
+                    continue
+                
+                file_name = str(child_data.get("name", f"file_{child_id}"))
+                download_link = str(child_data.get("link", ""))
+                
+                if not download_link:
+                    logger.warning("No download link for %s, skipping", file_name)
+                    continue
+                
+                output_path = os.path.join(args.output, file_name)
+                file_size = int(child_data.get("size", 0))
+                
+                progress_bar = _create_progress_bar(file_name, file_size, args.json, mode="Downloading")
+                progress_callback = _progress_callback_factory(progress_bar)
+                
+                try:
+                    client.download_file(download_link, output_path, progress_callback)
+                    results.append({
+                        "file": file_name,
+                        "status": "success",
+                        "path": output_path,
+                        "size": file_size,
+                    })
+                except (GofileError, httpx.HTTPError, OSError) as error:
+                    logger.error("Download failed for %s: %s", file_name, error)
+                    results.append(_handle_upload_error(file_name, error))
+                finally:
+                    if progress_bar:
+                        progress_bar.close()
+        else:
+            raise GofileError(f"Unknown content type: {content_type}")
+            
+    except (GofileError, httpx.HTTPError) as error:
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.exception("Failed to download from %s", content_id)
+        else:
+            logger.error("Failed to download from %s: %s", content_id, error)
+        results.append({
+            "content_id": content_id,
+            "status": "error",
+            "message": str(error),
+            "errorType": error.__class__.__name__,
+        })
+    
+    return results
+
+
+def output_results(results: List[Dict[str, object]], json_mode: bool, is_download: bool = False) -> None:
     """Display results in either JSON or human readable form."""
 
     if json_mode:
@@ -187,9 +323,12 @@ def output_results(results: List[Dict[str, object]], json_mode: bool) -> None:
     print("\n--- Summary ---")
     for result in results:
         if result["status"] == "success":
-            print(f"✅ {result['file']} -> {result['downloadPage']}")
+            if is_download:
+                print(f"✅ {result['file']} -> {result.get('path')}")
+            else:
+                print(f"✅ {result['file']} -> {result.get('downloadPage')}")
         else:
-            print(f"❌ {result['file']} -> {result.get('message')}")
+            print(f"❌ {result.get('file', result.get('content_id', 'unknown'))} -> {result.get('message')}")
     successes = sum(1 for res in results if res["status"] == "success")
     failures = len(results) - successes
     logger.info("Summary: %s succeeded, %s failed", successes, failures)
@@ -203,11 +342,22 @@ def main() -> None:
     configure_logging(args.verbose)
 
     token = os.environ.get("GOFILE_TOKEN")
-    _log_token_state(token, args.json)
-
-    client = GofileClient(token=token)
-    results = upload_files(args, client)
-    output_results(results, args.json)
+    
+    # Check if we're in download mode or upload mode
+    if args.download:
+        _log_token_state(token, args.json)
+        client = GofileClient(token=token)
+        results = download_files(args, client)
+        output_results(results, args.json, is_download=True)
+    elif args.files:
+        _log_token_state(token, args.json)
+        client = GofileClient(token=token)
+        results = upload_files(args, client)
+        output_results(results, args.json, is_download=False)
+    else:
+        logger.error("No files specified for upload and no download URL provided.")
+        logger.error("Use -d/--download <URL> to download or provide files to upload.")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

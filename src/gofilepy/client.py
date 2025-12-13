@@ -229,3 +229,85 @@ class GofileClient:
 
         result = self.upload(file_path, folder_id, callback)
         return result.to_dict()
+
+    def create_guest_account(self) -> Dict[str, Any]:
+        """Create a guest account and return the token."""
+
+        logger.debug("Creating guest account")
+        url = f"{self.API_ROOT}/accounts"
+        response = self._request("POST", url, context={"action": "create_guest"})
+        
+        if "token" in response:
+            self.token = str(response["token"])
+            self.client.headers.update({"Authorization": f"Bearer {self.token}"})
+            logger.debug("Guest account created with token: %s***", self.token[:4])
+        
+        return response
+
+    def get_contents(self, content_id: str) -> Dict[str, Any]:
+        """Fetch information about a content ID (folder or file)."""
+
+        # If we don't have a token, create a guest account first
+        if not self.token:
+            logger.debug("No token available, creating guest account")
+            self.create_guest_account()
+
+        logger.debug("Fetching contents for: %s", content_id)
+        # Add query parameters and website token header as shown in the API
+        url = f"{self.API_ROOT}/contents/{content_id}"
+        params = {
+            "contentFilter": "",
+            "page": "1",
+            "pageSize": "1000",
+            "sortField": "name",
+            "sortDirection": "1"
+        }
+        headers = {
+            "x-website-token": "4fd6sg89d7s6" # to avoid error-notPremium
+        }
+        return self._request("GET", url, params=params, headers=headers, context={"content_id": content_id})
+
+    def download_file(
+        self,
+        download_url: str,
+        output_path: str,
+        callback: Optional[Callable[[int], None]] = None,
+    ) -> None:
+        """Download a file from the provided direct link."""
+
+        logger.info("Starting download: %s -> %s", download_url, output_path)
+        
+        cookies = {}
+        if self.token:
+            cookies["accountToken"] = self.token
+            logger.debug("Using accountToken cookie for download")
+        
+        try:
+            with self.client.stream("GET", download_url, cookies=cookies, timeout=None) as response:
+                response.raise_for_status()
+                
+                total_size = int(response.headers.get("content-length", 0))
+                logger.debug("File size: %s bytes", total_size)
+                
+                os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+                
+                with open(output_path, "wb") as f:
+                    for chunk in response.iter_bytes(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            if callback:
+                                callback(len(chunk))
+                
+                logger.info("Download complete: %s", output_path)
+        except httpx.HTTPError as exc:
+            logger.error("Download failed for %s: %s", download_url, exc)
+            raise GofileNetworkError(
+                f"Failed to download from {download_url}",
+                context={"url": download_url, "output": output_path}
+            ) from exc
+        except OSError as exc:
+            logger.error("Failed to write file %s: %s", output_path, exc)
+            raise GofileError(
+                f"Failed to write file to {output_path}",
+                context={"output": output_path}
+            ) from exc
